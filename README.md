@@ -75,3 +75,4 @@ at Windows login.
 - `data/jobs.db` is created automatically.
 - Duplicate jobs are detected using a hash.
 - Tune keywords and score thresholds in `config.py`.
+# Job_Alert
