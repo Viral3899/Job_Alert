@@ -1,37 +1,69 @@
 import re
 from config import TARGET_ROLES, TARGET_LOCATIONS, TARGET_SKILLS, EXCLUDED_TERMS
 
+
 def normalize(text):
-    return re.sub(r"\s+", " ", text.lower())
+    return re.sub(r"\s+", " ", (text or "").lower())
+
+
+def _has_phrase(text, phrase):
+    return phrase.lower() in text
+
+
+def _experience_score(full_text):
+    ranges = re.findall(r"(\d+)\s*(?:-|to)\s*(\d+)\s*(?:years|yrs)", full_text)
+    single = re.findall(r"(\d+)\+?\s*(?:years|yrs)", full_text)
+    for lo, hi in ranges:
+        lo, hi = int(lo), int(hi)
+        if lo <= 3 <= hi or lo <= 4 <= hi or lo <= 5 <= hi:
+            return 10
+    for years in single:
+        y = int(years)
+        if 2 <= y <= 5:
+            return 10
+        if y == 6:
+            return 5
+        if y >= 7:
+            return -15
+    return 5
+
 
 def calculate_match(job):
-    title = normalize(job["title"])
-    location = normalize(job["location"])
-    description = normalize(job["description"])
+    title = normalize(job.get("title", ""))
+    location = normalize(job.get("location", ""))
+    description = normalize(job.get("description", ""))
     full_text = f"{title} {location} {description}"
 
+    # 100-point score: role 35 + location 20 + skills 35 + experience 10.
+    role_hits = [r for r in TARGET_ROLES if _has_phrase(title, r)]
+    location_hits = [l for l in TARGET_LOCATIONS if _has_phrase(full_text, l)]
+    skill_hits = [s for s in TARGET_SKILLS if _has_phrase(full_text, s)]
+
     score = 0
-
-    if any(role in title for role in TARGET_ROLES):
+    if role_hits:
         score += 35
+        # Exact-ish title quality bonus inside the role component.
+        if any(title == r or title.startswith(r) for r in role_hits):
+            score += 5
 
-    if any(loc in full_text for loc in TARGET_LOCATIONS):
+    if location_hits:
         score += 20
 
-    matched_skills = [s for s in TARGET_SKILLS if s.lower() in full_text]
-    score += min(len(matched_skills) * 4, 40)
+    score += min(len(skill_hits) * 4, 35)
+    score += _experience_score(full_text)
 
-    m = re.search(r"(\d+)\s*(?:-|to)\s*(\d+)\s*years", full_text)
-    if m and int(m.group(1)) <= 3 <= int(m.group(2)):
-        score += 5
+    negative_hits = [x for x in EXCLUDED_TERMS if _has_phrase(full_text, x)]
+    score -= min(len(negative_hits) * 20, 40)
 
-    if any(term in full_text for term in EXCLUDED_TERMS):
-        score -= 40
+    score = max(0, min(int(score), 100))
+    return score, skill_hits, role_hits, location_hits, negative_hits
 
-    return max(0, min(score, 100)), matched_skills
 
 def match_job(job):
-    score, skills = calculate_match(job)
+    score, skills, roles, locations, negatives = calculate_match(job)
     job["match_score"] = score
     job["matched_skills"] = skills
+    job["matched_roles"] = roles
+    job["matched_locations"] = locations
+    job["negative_terms"] = negatives
     return job

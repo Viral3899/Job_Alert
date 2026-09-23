@@ -1,15 +1,14 @@
 {
-  "version": 2,
-  "builds": [
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
     {
-      "src": "main.py",
-      "use": "@vercel/python"
+      "path": "/api/cron",
+      "schedule": "*/20 * * * *"
     }
   ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "main.py"
+  "functions": {
+    "api/cron.py": {
+      "maxDuration": 300
     }
-  ]
+  }
 }
