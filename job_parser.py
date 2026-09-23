@@ -42,7 +42,7 @@ def extract_company(body):
     return "Unknown"
 
 def extract_location(body):
-    locations = ["Remote", "Rajkot", "Ahmedabad", "Gandhinagar", "GIFT City", "Gujarat"]
+    locations = ["Remote", "Rajkot",  "Gujarat"]
     lower = body.lower()
     found = [x for x in locations if x.lower() in lower]
     return ", ".join(found) if found else "Unknown"

@@ -1,14 +1,40 @@
-# Job Monitor
+# Job Monitor / Job Alert API
 
-Monitors LinkedIn, Indeed, and Naukri job-alert emails in Gmail, filters them against an AI/ML profile, stores jobs in SQLite, and sends matching jobs to Telegram.
+This project reads official job-alert emails from Gmail (LinkedIn, Indeed and Naukri), parses them, matches them against the AI/ML profile, and can send matching jobs to Telegram.
 
-## Important
-This project reads official job-alert emails. It does not log into or scrape LinkedIn, Indeed, or Naukri.
+## What changed
 
-## Setup
+- `main.py` now exports a FastAPI application as `app`, so Vercel can run it.
+- `GET /jobs/latest` fetches job-alert emails from the latest 24 hours.
+- `GET /api/jobs` is an alias for the same endpoint.
+- `GET /health` is a health check.
+- `GET /docs` exposes Swagger/OpenAPI documentation.
+- Local background monitoring is still available with `python main.py`.
+- Gmail credentials can be supplied through environment variables for Vercel.
 
-### 1. Python
-Use Python 3.10+.
+## API
+
+Examples:
+
+```text
+GET /jobs/latest
+GET /jobs/latest?limit=50
+GET /jobs/latest?limit=50&min_score=60
+GET /api/jobs
+GET /health
+```
+
+The latest-job endpoints use the Gmail query:
+
+```text
+newer_than:1d
+```
+
+and only search alerts from LinkedIn, Indeed and Naukri.
+
+## Local setup
+
+Use Python 3.10+:
 
 ```powershell
 python -m venv venv
@@ -16,63 +42,65 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
-### 2. Gmail API
-1. Open Google Cloud Console.
-2. Create/select a project.
-3. Enable the Gmail API.
-4. Create OAuth Client ID -> Desktop app.
-5. Download the JSON credentials.
-6. Rename it to `credentials.json`.
-7. Put it in this project folder.
-
-On the first run, a browser will open for Gmail authorization. `token.json` is then created automatically.
-
-### 3. Telegram
-1. Open Telegram and message `@BotFather`.
-2. Run `/newbot`.
-3. Copy the bot token.
-4. Message your new bot and send `/start`.
-5. Put the bot token and chat ID in `.env`.
-
 Create `.env` from `.env.example`.
 
-### 4. Job alerts
-Create official alerts on LinkedIn, Indeed, and Naukri for:
-- AI/ML Engineer
-- AI Engineer
-- Generative AI Engineer
-- GenAI Engineer
-- Machine Learning Engineer
-- LLM Engineer
-- RAG Engineer
-- Data Scientist
+For local Gmail OAuth, place your OAuth client file at:
 
-Locations:
-- Remote
-- Rajkot
-- Ahmedabad
-- Gandhinagar / GIFT City
+```text
+credentials.json
+```
 
-The Gmail reader searches recent messages from LinkedIn/Indeed/Naukri.
-
-### 5. Run
+On the first local run:
 
 ```powershell
 python main.py
 ```
 
-The first run authorizes Gmail. Then the monitor checks every 20 minutes.
+A browser opens for Gmail authorization and creates `token.json`.
 
-## Windows startup
-For 24/7 local monitoring, use Windows Task Scheduler to start:
+To run only the API locally:
 
-`venv\Scripts\python.exe main.py`
+```powershell
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
 
-at Windows login.
+Then open:
 
-## Notes
-- Match scoring is rule-based in this starter version.
-- `data/jobs.db` is created automatically.
-- Duplicate jobs are detected using a hash.
-- Tune keywords and score thresholds in `config.py`.
-# Job_Alert
+```text
+http://localhost:8000/docs
+```
+
+## Vercel deployment
+
+Do **not** upload these files:
+
+- `.env`
+- `credentials.json`
+- `token.json`
+- `venv/`
+- `data/jobs.db`
+
+Instead add the Gmail OAuth values to Vercel Project Settings -> Environment Variables.
+
+### `GMAIL_TOKEN_JSON`
+
+Copy the complete JSON contents of your local `token.json` and store it as the `GMAIL_TOKEN_JSON` environment variable.
+
+### `GMAIL_CREDENTIALS_JSON`
+
+Only needed when the application needs the OAuth client configuration. Store the complete contents of your OAuth client JSON.
+
+Also configure:
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+MIN_MATCH_SCORE
+CHECK_INTERVAL_MINUTES
+```
+
+Vercel serverless functions should be used for the API. The continuous `while True` monitor in `main.py` is for local/worker execution and should not be expected to run continuously inside a Vercel request.
+
+## Security
+
+Never commit API keys, Telegram bot tokens, Gmail OAuth credentials, `token.json`, or `.env`.
