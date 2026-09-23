@@ -1,87 +1,108 @@
-# Job Monitor v2 — 48h AI/ML/GenAI Alerts
+# Job Monitor v4 — 15-Minute Scheduler + Exact Job Links + Tailored Resume
 
-This version reads official job-alert emails in Gmail, looks back exactly 48 hours, scores jobs against an AI/ML/GenAI profile, sends jobs scoring 60%+ to Telegram, and uses a Gmail label for persistent deduplication.
+This version checks official job-alert emails in Gmail, looks back 48 hours, matches jobs at 60%+, keeps the exact job-specific apply URL when available, generates a JD-specific ATS resume, and sends the result to Telegram.
 
-## Important architecture
+## Scheduling architecture
 
-- Local Windows: `python main.py` checks every 20 minutes.
-- Vercel: `/api/cron` runs once per cron invocation; `vercel.json` schedules it every 20 minutes.
-- Vercel cannot keep an infinite Python process running. Cron invokes the function periodically.
-- Vercel Hobby currently does not provide 20-minute cron frequency; current Vercel documentation describes Hobby cron as once per day, while Pro/Enterprise support per-minute schedules. Use Pro for `*/20` automation.
-- Gmail OAuth must use `gmail.modify` in this version because the monitor adds `JOB_MONITOR_PROCESSED` to processed alert emails. This is how deduplication survives serverless restarts without a separate database.
+The same `/api/cron` endpoint can be called by multiple schedulers:
 
-## Local setup
-
-1. Re-authorize Gmail after the scope change to `gmail.modify`.
-2. Keep `credentials.json` in the project root.
-3. Run:
-
-```bash
-python main.py
+```text
+Vercel Cron (*/15 when the Vercel plan permits it)
+                 \
+                  +--> /api/cron --> Gmail --> parse --> match >=60%
+                 /                                  --> tailored resume
+External scheduler (every 15 min)                  --> Telegram
 ```
 
-The first run creates `token.json`.
+This means you can keep Vercel Cron configured for 15 minutes and also use an external scheduler as a fallback. Both call the **same endpoint**.
 
-## Vercel setup
+### External 15-minute scheduler
 
-After local Gmail authorization, put the complete contents of `token.json` into the Vercel environment variable `GMAIL_TOKEN_JSON`.
+For 24/7 operation even when your laptop is off, use an external HTTP scheduler such as cron-job.org/EasyCron or another service that supports a 15-minute interval.
 
-Also add:
+Configure:
 
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `JOB_LOOKBACK_HOURS=48`
-- `MIN_MATCH_SCORE=60`
-- `CRON_SECRET`
+- Method: `GET`
+- URL: `https://jobalert-nine.vercel.app/api/cron`
+- Header: `Authorization: Bearer <your fresh CRON_SECRET>`
+- Interval: every 15 minutes
 
-Deploy the project to Vercel and make sure the cron is attached to the Production deployment.
+Do not put `CRON_SECRET` in a public GitHub repository.
 
-## Naukri URL handling
+### Local Windows fallback
+
+`call_api.bat` calls the same endpoint. Windows Task Scheduler can run it every 15 minutes, but the computer must remain online.
+
+## Exact job-specific apply links
 
 The parser now:
 
-1. Reads HTML `<a href>` links instead of regex-only URLs.
-2. Unwraps common redirect parameters.
-3. Removes tracking parameters.
-4. Accepts canonical `naukri.com/job-listings-...` links.
-5. If an email only contains a generic/broken Naukri link, it sends a working Naukri search URL instead of a broken tracking URL.
+1. Reads HTML `<a href>` job cards instead of relying on one email-level URL.
+2. Associates the title and local card text with each individual link.
+3. Unwraps common redirect/URL parameters.
+4. Removes tracking parameters.
+5. Keeps canonical LinkedIn `/jobs/view/...` URLs.
+6. Keeps canonical Naukri `/job-listings-...` URLs.
+7. Keeps Indeed job/view links where present.
+8. Handles Wellfound/Cutshort/Instahyre/Hirist/Foundit/TimesJobs/Shine/Freshersworld links.
+9. Uses a platform search URL only when an exact job URL is unavailable.
 
-## Match scoring
+Telegram therefore receives:
 
-100-point rule-based score:
+```text
+🔗 Apply: <specific job URL>
+```
 
-- Role: 40
-- Location: 20
-- Skills: up to 35
-- Experience: up to 10
-- Negative terms: penalty
+rather than only the platform homepage whenever the alert exposes a job-specific URL.
 
-Telegram only receives jobs at or above `MIN_MATCH_SCORE=60`.
+## Duplicate protection
 
-## Recommended alert sources
+There are two layers:
 
-Start with official email alerts from LinkedIn, Indeed, Naukri, Wellfound, Cutshort, Instahyre, Hirist, Foundit, TimesJobs, Shine, Freshersworld, and selected company career pages.
+1. Gmail `JOB_MONITOR_PROCESSED` label prevents the same alert email from being reprocessed.
+2. The job database uses the normalized exact job URL as the primary job identity, so if Vercel Cron and an external scheduler both see the same job, Telegram is sent only once.
 
-Avoid login automation/scraping where a site's terms or access controls prohibit it. Email alerts and official APIs/feeds are preferred.
+A job is saved only after successful handling, so a temporary Telegram failure can be retried on the next scheduler run.
 
-## Tailored Resume Automation
+## Job → JD → resume → Telegram
 
-For every job scoring at or above `MIN_MATCH_SCORE` (default 60), the monitor sends:
-1. The job alert and apply link to Telegram.
-2. A JD-specific ATS-tailored DOCX resume as a Telegram document.
+For every job at or above 60%:
 
-The tailoring model is instructed to use only facts present in `resume_template.docx`; it must not invent experience or skills.
+1. Extract the individual job URL.
+2. Use the available job-alert/JD text for matching.
+3. Calculate the match score.
+5. Send the job-specific apply link and tailored DOCX resume to Telegram.
 
-Required environment variables:
-- `GROQ_API_KEY`
-- `GROQ_MODEL` (default `openai/gpt-oss-120b`)
+If the email contains only a title/snippet and no full JD, the system can only tailor from the text available in the alert. It does not invent missing requirements.
+
+## Vercel environment variables
+
+Add:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID=8674494769`
+- `CRON_SECRET=<fresh random secret>`
+- `GMAIL_TOKEN_JSON=<complete authorized token.json JSON>`
 - `JOB_LOOKBACK_HOURS=48`
 - `MIN_MATCH_SCORE=60`
 
-For Vercel, also configure:
-- `GMAIL_TOKEN_JSON` (the authorized Gmail token JSON, including refresh token)
-- `CRON_SECRET`
-- Telegram variables
-- Groq variables
+After changing environment variables, redeploy the Production deployment.
 
-The Vercel endpoint is `/api/cron` and is scheduled every 20 minutes by `vercel.json`. Vercel plan limits can affect how frequently a cron can run.
+## Local setup
+
+```bash
+pip install -r requirements.txt
+python main.py
+```
+
+The first Gmail run may open Google OAuth locally. The required scope is `gmail.modify` because processed alert emails are labeled.
+
+## Security
+
+The Telegram bot token and `CRON_SECRET` are secrets. If either was previously posted publicly, rotate it before production use.
+
+
+### Telegram token format
+Set the token value only:
+`TELEGRAM_BOT_TOKEN=123456789:ABC...`
+Do not put `TELEGRAM_BOT_TOKEN=` inside the value.

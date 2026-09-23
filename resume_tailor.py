@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 
 import requests
@@ -25,6 +26,59 @@ def _extract_json(text):
     return json.loads(text)
 
 
+MAX_JD_CHARS = 8000
+MAX_BASE_RESUME_CHARS = 12000
+MAX_TOTAL_PROMPT_CHARS = 22000
+GROQ_MAX_RETRIES = 3
+
+
+def _clean_job_description(text):
+    text = text or ""
+    # Remove common recommendation/footer noise from job-alert emails.
+    noise_patterns = [
+        r"\b\d+\s+more\s+[^\n]{0,180}jobs?[^\n]*",
+        r"(?im)^\s*(easily apply|actively hiring|apply now|view job|see all jobs)\s*$",
+        r"(?im)^\s*(unsubscribe|manage preferences|privacy policy|terms of use)\s*$",
+    ]
+    for pattern in noise_patterns:
+        text = re.sub(pattern, " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()[:MAX_JD_CHARS]
+
+
+def _post_groq(payload):
+    last_error = None
+    for attempt in range(GROQ_MAX_RETRIES):
+        try:
+            response = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=90,
+            )
+            if response.status_code == 429:
+                wait = 3 * (2 ** attempt)
+                print(f"Groq rate limit (429). Retrying in {wait}s ({attempt + 1}/{GROQ_MAX_RETRIES})...")
+                time.sleep(wait)
+                last_error = requests.HTTPError("Groq rate limit", response=response)
+                continue
+            if response.status_code == 413:
+                raise requests.HTTPError("Groq payload too large after prompt limits.", response=response)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < GROQ_MAX_RETRIES - 1 and getattr(exc, "response", None) is not None and exc.response.status_code >= 500:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
+    raise last_error
+
+
 def tailor_resume(job):
     """Create a JD-specific ATS resume without inventing experience."""
     if not GROQ_API_KEY:
@@ -32,11 +86,13 @@ def tailor_resume(job):
         return None
 
     base = _read_base_resume()
-    jd = job.get("description", "")
+    jd = _clean_job_description(job.get("description", ""))
     title = job.get("title", "AI/ML Engineer")
     company = job.get("company", "Unknown")
 
-    prompt = f"""
+    base = base[:MAX_BASE_RESUME_CHARS]
+
+    prompt_template = """
 You are an ATS resume editor. Tailor the candidate resume below to the exact job description.
 
 STRICT RULES:
@@ -47,7 +103,7 @@ STRICT RULES:
 5. Keep the candidate's name/contact information unchanged.
 6. Keep all employment dates and employer names unchanged.
 7. Make the resume ATS-friendly and concise, ideally 1-2 pages.
-8. Use the exact JD terminology when it accurately describes an existing skill.
+8. Use exact JD terminology only when it accurately describes an existing skill.
 9. If a JD requirement is missing from the base resume, do not add it.
 10. Return JSON only.
 
@@ -55,10 +111,10 @@ JOB TITLE: {title}
 COMPANY: {company}
 
 JOB DESCRIPTION:
-{jd[:18000]}
+{jd}
 
 BASE RESUME:
-{base[:30000]}
+{base}
 
 Return exactly this JSON structure:
 {{
@@ -75,24 +131,30 @@ Return exactly this JSON structure:
 }}
 """
 
-    response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": GROQ_MODEL,
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": "Return valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-        },
-        timeout=90,
-    )
-    response.raise_for_status()
+    # Keep the request comfortably below Groq payload/context limits.
+    fixed = prompt_template.format(title=title, company=company, jd="", base="")
+    available = max(4000, MAX_TOTAL_PROMPT_CHARS - len(fixed))
+    jd_budget = min(MAX_JD_CHARS, int(available * 0.45))
+    base_budget = min(MAX_BASE_RESUME_CHARS, available - jd_budget)
+    jd = jd[:jd_budget]
+    base = base[:base_budget]
+    prompt = prompt_template.format(title=title, company=company, jd=jd, base=base)
+    if len(prompt) > MAX_TOTAL_PROMPT_CHARS:
+        # Last-resort deterministic trim of the JD only; preserve the JSON instructions.
+        overflow = len(prompt) - MAX_TOTAL_PROMPT_CHARS
+        jd = jd[:max(3000, len(jd) - overflow - 100)]
+        prompt = prompt_template.format(title=title, company=company, jd=jd, base=base)
+
+    payload = {
+        "model": GROQ_MODEL,
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": "Return valid JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    response = _post_groq(payload)
     content = response.json()["choices"][0]["message"]["content"]
     return _extract_json(content)
 

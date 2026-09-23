@@ -1,7 +1,23 @@
+import hashlib
 import sqlite3
 from pathlib import Path
 
 DB_PATH = Path("data/jobs.db")
+
+
+def _canonical_key(job):
+    """Prefer the exact job URL for deduplication; fall back to job metadata."""
+    url = (job.get("url") or "").strip().lower()
+    if url and not url.endswith("/"):
+        return f"url:{url}"
+    raw = "|".join([
+        job.get("source", ""),
+        job.get("title", ""),
+        job.get("company", ""),
+        job.get("location", ""),
+    ]).strip().lower()
+    return f"meta:{raw}"
+
 
 def get_connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -25,6 +41,12 @@ def get_connection():
     conn.commit()
     return conn
 
+
+def job_hash_for(job):
+    key = _canonical_key(job)
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
 def job_exists(job_hash):
     conn = get_connection()
     row = conn.execute(
@@ -32,6 +54,7 @@ def job_exists(job_hash):
     ).fetchone()
     conn.close()
     return row is not None
+
 
 def save_job(job):
     conn = get_connection()
@@ -48,7 +71,8 @@ def save_job(job):
             job["email_id"]
         ))
         conn.commit()
+        return True
     except sqlite3.IntegrityError:
-        pass
+        return False
     finally:
         conn.close()

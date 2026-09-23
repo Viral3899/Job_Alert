@@ -7,7 +7,6 @@ from job_parser import parse_email_jobs
 from job_matcher import match_job
 from database import job_exists, save_job
 from telegram import send_telegram_message
-from resume_tailor import tailor_resume, build_resume_docx
 
 
 def process_jobs():
@@ -15,49 +14,65 @@ def process_jobs():
     print(f"Checking job alerts from the last {JOB_LOOKBACK_HOURS} hours...")
     print("=" * 60)
 
+    processed_email_ids = []
     try:
         emails = get_job_emails(JOB_LOOKBACK_HOURS)
-        processed_email_ids = []
 
         for email in emails:
+            email_ok = True
             try:
                 jobs = parse_email_jobs(email)
                 print(f"Email {email['id']}: {len(jobs)} job(s) detected")
 
                 for raw_job in jobs:
-                    job = match_job(raw_job)
-                    print(
-                        f"  {job['title']} | {job['company']} | "
-                        f"{job['match_score']}% | {job['source']}"
-                    )
+                    try:
+                        job = match_job(raw_job)
+                        print(
+                            f"  {job['title']} | {job['company']} | "
+                            f"{job['match_score']}% | {job['source']} | {job['url']}"
+                        )
 
-                    if job_exists(job["job_hash"]):
-                        print("  Already processed.")
-                        continue
+                        # The exact job URL is the primary deduplication key.
+                        if job_exists(job["job_hash"]):
+                            print("  Already processed; skipping Telegram.")
+                            continue
 
-                    save_job(job)
-                    if job["match_score"] >= MIN_MATCH_SCORE:
-                        tailored = tailor_resume(job)
-                        resume_path = build_resume_docx(job, tailored) if tailored else None
-                        send_telegram_message(job, resume_path)
-                        print("  Telegram notification + tailored resume sent.")
-                    else:
-                        print(f"  Below {MIN_MATCH_SCORE}% threshold.")
+                        if job["match_score"] >= MIN_MATCH_SCORE:
+                            # Job alerts only: no resume generation, no Groq calls.
+                            send_telegram_message(job)
+                            print("  Telegram notification sent.")
 
-                # Mark the source email only after all jobs in it have been handled.
-                processed_email_ids.append(email["id"])
+                        # Save only after the job has been successfully handled.
+                        # This prevents a failed Telegram/API operation from being
+                        # permanently marked as processed.
+                        save_job(job)
+
+                        if job["match_score"] < MIN_MATCH_SCORE:
+                            print(f"  Below {MIN_MATCH_SCORE}% threshold; stored without alert.")
+
+                    except Exception as job_exc:
+                        email_ok = False
+                        print("Error processing individual job:", job_exc)
+                        traceback.print_exc()
+
+                # Only label the email after every job in the email was handled.
+                if email_ok:
+                    processed_email_ids.append(email["id"])
 
             except Exception as exc:
                 print("Error processing email:", exc)
                 traceback.print_exc()
 
-        # Gmail label provides persistent deduplication across local runs and Vercel.
+        # Gmail label is the cross-run/serverless deduplication layer.
         if processed_email_ids:
             mark_emails_processed(processed_email_ids)
+
+        return {"emails": len(emails), "processed_emails": len(processed_email_ids)}
 
     except Exception as exc:
         print("Main error:", exc)
         traceback.print_exc()
+        raise
 
 
 def main():

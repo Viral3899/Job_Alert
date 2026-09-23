@@ -18,29 +18,76 @@ def _credentials_from_env():
     if not raw:
         return None
     try:
-        return Credentials.from_authorized_user_info(json.loads(raw), SCOPES)
+        info = json.loads(raw)
+        # Do not request a new scope during construction. We validate the
+        # stored scopes below and force a fresh OAuth flow when gmail.modify
+        # is not present.
+        return Credentials.from_authorized_user_info(info)
     except Exception:
         return None
 
 
+def _has_required_scope(creds):
+    required = "https://www.googleapis.com/auth/gmail.modify"
+    scopes = set(creds.scopes or [])
+    return required in scopes
+
+
+def _local_oauth_flow():
+    if not os.path.exists("credentials.json"):
+        raise RuntimeError("credentials.json is missing. Download your Google OAuth client credentials first.")
+    flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+    return flow.run_local_server(port=0)
+
+
 def get_gmail_service():
+    # A token created with gmail.readonly cannot be silently upgraded to
+    # gmail.modify. It must be re-authorized. This was the source of the
+    # invalid_scope/insufficientPermissions errors after the processed-label
+    # feature was added.
     creds = _credentials_from_env()
 
     if creds is None and os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file("token.json")
+        except Exception:
+            creds = None
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    needs_reauth = creds is None or not _has_required_scope(creds)
+
+    if creds and creds.expired and creds.refresh_token and not needs_reauth:
+        try:
             creds.refresh(Request())
-        else:
-            if os.getenv("VERCEL"):
-                raise RuntimeError("GMAIL_TOKEN_JSON is missing or cannot be refreshed on Vercel.")
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_local_server(port=0)
+        except Exception as exc:
+            # Google returns invalid_scope when the refresh token does not
+            # support the requested scope. Fall back to interactive OAuth.
+            if "invalid_scope" in str(exc).lower() or "insufficient" in str(exc).lower():
+                needs_reauth = True
+                creds = None
+            else:
+                raise
 
-        if not os.getenv("VERCEL"):
-            with open("token.json", "w") as token:
-                token.write(creds.to_json())
+    if needs_reauth or not creds or not creds.valid:
+        if os.getenv("VERCEL"):
+            raise RuntimeError(
+                "GMAIL_TOKEN_JSON is missing, expired, or does not contain gmail.modify. "
+                "Re-authorize locally with this version and then update GMAIL_TOKEN_JSON in Vercel."
+            )
+
+        # Remove the old local token so OAuth cannot keep reusing the
+        # gmail.readonly token.
+        try:
+            if os.path.exists("token.json"):
+                os.remove("token.json")
+        except OSError:
+            pass
+
+        print("Gmail OAuth scope is outdated. Starting a fresh gmail.modify authorization...")
+        creds = _local_oauth_flow()
+
+    if not os.getenv("VERCEL"):
+        with open("token.json", "w", encoding="utf-8") as token:
+            token.write(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)
 

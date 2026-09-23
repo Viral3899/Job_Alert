@@ -4,13 +4,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Be tolerant of a common .env mistake: TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN=123...
+if TELEGRAM_BOT_TOKEN:
+    TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN.strip().strip("\'")
+    if TELEGRAM_BOT_TOKEN.startswith("TELEGRAM_BOT_TOKEN="):
+        TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN.split("=", 1)[1].strip().strip("\'")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "20"))
 JOB_LOOKBACK_HOURS = int(os.getenv("JOB_LOOKBACK_HOURS", "48"))
 MIN_MATCH_SCORE = int(os.getenv("MIN_MATCH_SCORE", "60"))
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # Search terms intentionally broader than only "AI/ML Engineer" so alerts from
 # adjacent GenAI/LLM/RAG/Data Scientist roles are not missed.

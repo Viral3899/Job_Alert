@@ -1,8 +1,15 @@
 import hashlib
 import re
 from html import unescape
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 from bs4 import BeautifulSoup
+
+
+TRACKING_KEYS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_name", "gclid", "fbclid", "mc_cid", "mc_eid", "trk", "trkemail",
+    "src", "sid", "xp", "px", "nignbevent_src", "ref", "refid",
+}
 
 
 def clean_text(text):
@@ -11,79 +18,127 @@ def clean_text(text):
 
 def detect_source(sender, text=""):
     value = f"{sender} {text}".lower()
-    if "linkedin" in value:
-        return "LinkedIn"
-    if "indeed" in value:
-        return "Indeed"
-    if "naukri" in value:
-        return "Naukri"
-    if "wellfound" in value or "angel.co" in value:
-        return "Wellfound"
-    if "cutshort" in value:
-        return "Cutshort"
-    if "instahyre" in value:
-        return "Instahyre"
-    if "hirist" in value:
-        return "Hirist"
-    if "foundit" in value or "monster" in value:
-        return "Foundit"
-    if "timesjobs" in value:
-        return "TimesJobs"
-    if "shine" in value:
-        return "Shine"
-    if "freshersworld" in value:
-        return "Freshersworld"
+    checks = [
+        ("linkedin", "LinkedIn"), ("indeed", "Indeed"), ("naukri", "Naukri"),
+        ("wellfound", "Wellfound"), ("angel.co", "Wellfound"), ("cutshort", "Cutshort"),
+        ("instahyre", "Instahyre"), ("hirist", "Hirist"), ("foundit", "Foundit"),
+        ("monster", "Foundit"), ("timesjobs", "TimesJobs"), ("shine", "Shine"),
+        ("freshersworld", "Freshersworld"),
+    ]
+    for needle, source in checks:
+        if needle in value:
+            return source
     return "Unknown"
 
 
-def _unwrap_tracking_url(url, max_depth=3):
-    url = unescape(unquote(url)).strip().strip("<>\"'")
+def _unwrap_tracking_url(url, max_depth=5):
+    url = unescape(unquote(url or "")).strip().strip("<>\"'")
     for _ in range(max_depth):
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
         candidate = None
-        for key in ("url", "u", "redirect", "redirect_url", "dest", "destination", "target", "link"):
+        for key in (
+            "url", "u", "redirect", "redirect_url", "dest", "destination",
+            "target", "link", "continue", "return", "redirectUrl",
+        ):
             if params.get(key):
                 candidate = params[key][0]
                 break
         if not candidate:
             break
         candidate = unescape(unquote(candidate))
-        if candidate.startswith("http"):
+        if candidate.startswith(("http://", "https://")):
             url = candidate
         else:
             break
     return url
 
 
+def _clean_query(parsed):
+    allowed = []
+    for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
+        if key.lower() in TRACKING_KEYS:
+            continue
+        for value in values:
+            allowed.append((key, value))
+    return urlencode(allowed)
+
+
+def _fallback_search_url(source, title=""):
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")
+    if source == "Naukri":
+        return f"https://www.naukri.com/{slug}-jobs" if slug else "https://www.naukri.com/"
+    if source == "LinkedIn":
+        return "https://www.linkedin.com/jobs/"
+    if source == "Indeed":
+        return "https://in.indeed.com/"
+    if source == "Wellfound":
+        return "https://wellfound.com/jobs"
+    return ""
+
+
 def normalize_job_url(url, source, title="", company="", location=""):
     if not url:
-        return ""
+        return _fallback_search_url(source, title)
+
     url = _unwrap_tracking_url(url)
     parsed = urlparse(url)
-    host = parsed.netloc.lower().replace("www.", "")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return _fallback_search_url(source, title)
 
-    # Strip tracking parameters while keeping the canonical path/query.
-    allowed = []
-    for k, values in parse_qs(parsed.query, keep_blank_values=True).items():
-        if k.lower() in {"src", "sid", "xp", "px", "nignbevent_src", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"}:
-            continue
-        for v in values:
-            allowed.append((k, v))
-    query = urlencode(allowed)
-    canonical = urlunparse(("https", parsed.netloc, parsed.path, "", query, ""))
+    host = parsed.netloc.lower().replace("www.", "")
+    path = parsed.path or "/"
+    query = _clean_query(parsed)
 
     if source == "Naukri":
-        if "naukri.com" in host and "/job-listings-" in parsed.path.lower():
-            return canonical
-        # If email contains a generic Naukri URL, provide a working search URL
-        # rather than sending a broken tracking URL to Telegram.
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-        if slug:
-            return f"https://www.naukri.com/{slug}-jobs"
-        return "https://www.naukri.com/"
+        if "naukri.com" in host and "/job-listings-" in path.lower():
+            return urlunparse(("https", "www.naukri.com", path, "", query, ""))
+        return _fallback_search_url(source, title)
 
-    return canonical
+    if source == "LinkedIn":
+        if "linkedin.com" in host:
+            match = re.search(r"/jobs/view/(\d+)", path, re.I)
+            if match:
+                return f"https://www.linkedin.com/jobs/view/{match.group(1)}/"
+            # Some alerts use a company/job path rather than a numeric job view.
+            if "/jobs/" in path.lower() and "/jobs/view/" not in path.lower():
+                return urlunparse(("https", "www.linkedin.com", path, "", query, ""))
+        return _fallback_search_url(source, title)
+
+    if source == "Indeed":
+        if "indeed." in host:
+            # Convert Indeed redirect links into the canonical job-specific viewjob URL.
+            jk_values = parse_qs(parsed.query).get("jk", [])
+            if jk_values and jk_values[0]:
+                return f"https://{parsed.netloc}/viewjob?jk={jk_values[0]}"
+            match = re.search(r"[?&]jk=([A-Za-z0-9_-]+)", url, re.I)
+            if match:
+                return f"https://{parsed.netloc}/viewjob?jk={match.group(1)}"
+            if "viewjob" in path.lower():
+                return urlunparse(("https", parsed.netloc, path, "", query, ""))
+            return urlunparse(("https", parsed.netloc, path, "", query, ""))
+
+    # Other platforms: preserve the actual URL after removing tracking parameters.
+    return urlunparse(("https", parsed.netloc, path, "", query, ""))
+
+
+def _is_platform_link(href, anchor_text, source):
+    value = f"{href} {anchor_text}".lower()
+    domains = {
+        "LinkedIn": "linkedin",
+        "Indeed": "indeed",
+        "Naukri": "naukri",
+        "Wellfound": "wellfound",
+        "Cutshort": "cutshort",
+        "Instahyre": "instahyre",
+        "Hirist": "hirist",
+        "Foundit": "foundit",
+        "TimesJobs": "timesjobs",
+        "Shine": "shine",
+        "Freshersworld": "freshersworld",
+    }
+    needle = domains.get(source)
+    return bool(needle and needle in value)
 
 
 def _extract_links(raw_html, source):
@@ -91,22 +146,20 @@ def _extract_links(raw_html, source):
     links = []
     for a in soup.find_all("a", href=True):
         href = unescape(a.get("href", "")).strip()
-        if not href.startswith("http"):
+        if not href.startswith(("http://", "https://")):
             continue
         text = clean_text(a.get_text(" ", strip=True))
-        if source == "Naukri" and "naukri" not in href.lower() and "naukri" not in text.lower():
+        if not _is_platform_link(href, text, source):
             continue
-        if source == "LinkedIn" and "linkedin" not in href.lower() and "linkedin" not in text.lower():
-            continue
-        if source == "Indeed" and "indeed" not in href.lower() and "indeed" not in text.lower():
-            continue
-        links.append((href, text))
+        links.append((href, text, a))
     return links
 
 
 def _title_from_anchor(anchor_text, subject):
     text = clean_text(anchor_text)
-    if len(text) >= 4 and len(text) <= 180:
+    # Avoid treating generic CTA labels as the job title.
+    generic = {"apply now", "view job", "apply", "see job", "view job details", "learn more", "open job"}
+    if len(text) >= 4 and len(text) <= 180 and text.lower() not in generic:
         return text
     subject = clean_text(subject)
     for pattern in (r"job alert.*?:\s*(.*)", r"jobs for.*?:\s*(.*)", r"new jobs.*?:\s*(.*)"):
@@ -116,36 +169,67 @@ def _title_from_anchor(anchor_text, subject):
     return subject or "Job Alert"
 
 
+def _title_from_anchor_element(anchor, anchor_text, subject):
+    generic = {"apply now", "view job", "apply", "see job", "view job details", "learn more", "open job"}
+    if anchor is not None and clean_text(anchor.get_text(" ", strip=True)).lower() in generic:
+        heading = anchor.find_previous(["h1", "h2", "h3", "h4", "h5", "strong"])
+        if heading:
+            value = clean_text(heading.get_text(" ", strip=True))
+            if 4 <= len(value) <= 180:
+                return value
+    return _title_from_anchor(anchor_text, subject)
+
+
+def _context_text(anchor):
+    """Get text from the closest card/table/list container around one job link."""
+    if not anchor:
+        return ""
+    node = anchor
+    for _ in range(5):
+        node = node.parent
+        if not node:
+            break
+        text = clean_text(str(node))
+        if 30 <= len(text) <= 2500:
+            return text
+    return clean_text(anchor.parent.get_text(" ", strip=True)) if anchor.parent else ""
+
+
 def extract_company(text):
     for pattern in (
         r"Company[:\s]+([^|\n]+)",
         r"Employer[:\s]+([^|\n]+)",
-        r"at\s+([A-Z][A-Za-z0-9 .&-]{2,60})",
+        r"(?:company|employer)\s*[-:]\s*([^|\n]+)",
+        r"at\s+([A-Z][A-Za-z0-9 .&'()-]{2,80})",
     ):
-        m = re.search(pattern, text, re.I)
+        m = re.search(pattern, text or "", re.I)
         if m:
             value = m.group(1).strip(" -|:")
-            if value:
+            if value and len(value) < 100:
                 return value
     return "Unknown"
 
 
 def extract_location(text):
     candidates = [
-        "Remote", "Rajkot", "Ahmedabad", "Gandhinagar", "GIFT City", "Gujarat",
-        "Bengaluru", "Bangalore", "Hyderabad", "Pune", "Gurugram", "Gurgaon",
-        "Noida", "Delhi", "Mumbai", "Chennai", "Indore", "India",
+        "Remote", "Remote India", "Rajkot", "Ahmedabad", "Gandhinagar", "GIFT City", "Gujarat",
+        "Bengaluru", "Bangalore", "Hyderabad", "Pune", "Gurugram", "Gurgaon", "Noida",
+        "Delhi", "Mumbai", "Chennai", "Indore", "India",
     ]
-    lower = text.lower()
+    lower = (text or "").lower()
     found = [x for x in candidates if x.lower() in lower]
     return ", ".join(dict.fromkeys(found)) if found else "Unknown"
 
 
 def _build_job(email, title, company, location, source, url, description):
     url = normalize_job_url(url, source, title, company, location)
-    raw = (title.lower() + company.lower() + location.lower() + url.lower())
+    # URL is the primary identity whenever it is an exact job URL.
+    identity = url.lower().rstrip("/") if url else "|".join([
+        source.lower(), title.lower(), company.lower(), location.lower()
+    ])
+    job_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return {
-        "job_hash": hashlib.sha256(raw.encode()).hexdigest(),
+        "job_hash": job_hash,
         "title": title.strip() or "Job Alert",
         "company": company.strip() or "Unknown",
         "location": location.strip() or "Unknown",
@@ -159,57 +243,51 @@ def _build_job(email, title, company, location, source, url, description):
 
 
 def parse_email(email):
-    raw = email.get("body", "")
-    body = clean_text(raw)
-    source = detect_source(email.get("sender", ""), raw)
-    links = _extract_links(raw, source)
-
-    # Prefer actual job links. If several are present, use the first one for the
-    # legacy single-job path; parse_email_jobs() below handles all of them.
-    job_links = []
-    for href, anchor_text in links:
-        normalized = normalize_job_url(href, source, anchor_text)
-        if source == "Naukri" and "/job-listings-" not in normalized.lower():
-            continue
-        job_links.append((normalized, anchor_text))
-
-    title = _title_from_anchor(job_links[0][1] if job_links else "", email.get("subject", ""))
-    company = extract_company(body)
-    location = extract_location(body)
-    url = job_links[0][0] if job_links else normalize_job_url("", source, title, company, location)
-    return _build_job(email, title, company, location, source, url, body)
+    jobs = parse_email_jobs(email)
+    return jobs[0] if jobs else _build_job(
+        email, clean_text(email.get("subject", "")), "Unknown", "Unknown",
+        detect_source(email.get("sender", ""), email.get("body", "")), "", clean_text(email.get("body", ""))
+    )
 
 
 def parse_email_jobs(email):
-    """Parse one email into one or more jobs when the alert contains multiple cards."""
-    raw = email.get("body", "")
-    body = clean_text(raw)
+    """Extract every job card and preserve its own apply URL and local card text."""
+    raw = email.get("raw_html") or email.get("body", "")
+    body = clean_text(email.get("body", ""))
     source = detect_source(email.get("sender", ""), raw)
     links = _extract_links(raw, source)
 
-    seen = set()
     jobs = []
-    for href, anchor_text in links:
-        normalized = normalize_job_url(href, source, anchor_text)
-        if source == "Naukri" and "/job-listings-" not in normalized.lower():
+    seen = set()
+    for href, anchor_text, anchor in links:
+        context = _context_text(anchor) or body
+        title = _title_from_anchor_element(anchor, anchor_text, email.get("subject", ""))
+        normalized = normalize_job_url(href, source, title)
+
+        # If normalization returned only a generic platform page, do not use it
+        # as a unique job identity when we have no exact job URL.
+        exact = any(marker in normalized.lower() for marker in (
+            "/jobs/view/", "/job-listings-", "viewjob", "/jobs/", "/job/"
+        ))
+        if not exact and source in {"LinkedIn", "Naukri"}:
             continue
-        if source == "LinkedIn" and "/jobs/view/" not in normalized.lower():
-            continue
-        if source == "Indeed" and "indeed" not in normalized.lower():
-            continue
-        key = normalized.lower()
+
+        key = normalized.lower().rstrip("/") if normalized else f"{title.lower()}|{context.lower()[:300]}"
         if key in seen:
             continue
         seen.add(key)
 
-        title = _title_from_anchor(anchor_text, email.get("subject", ""))
-        # Use text around the anchor when possible for company/location clues.
-        company = extract_company(body)
-        location = extract_location(body)
-        job = _build_job(email, title, company, location, source, normalized, body)
-        jobs.append(job)
+        company = extract_company(context)
+        location = extract_location(context)
+        description = context if len(context) >= 80 else body
+        jobs.append(_build_job(email, title, company, location, source, normalized, description))
 
+    # Fallback: some plain-text alerts do not expose usable HTML links.
     if not jobs:
-        jobs.append(parse_email(email))
+        title = _title_from_anchor("", email.get("subject", ""))
+        jobs.append(_build_job(
+            email, title, extract_company(body), extract_location(body), source,
+            normalize_job_url("", source, title), body
+        ))
 
     return jobs
