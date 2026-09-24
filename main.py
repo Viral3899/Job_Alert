@@ -7,7 +7,7 @@ from gmail_reader import get_job_emails, mark_emails_processed
 from job_matcher import match_job
 from job_parser import parse_email_jobs
 from logging_config import logger
-from resume_tailor import build_resume_docx, tailor_resume
+from resume_tailor import build_resume_pdf, tailor_resume
 from telegram import send_telegram_document, send_telegram_message
 
 
@@ -43,7 +43,7 @@ def process_jobs() -> dict:
                             # Generate tailored resume
                             tailored = tailor_resume(job)
                             if tailored:
-                                resume_path = build_resume_docx(job, tailored)
+                                resume_path = build_resume_pdf(job, tailored)
                                 logger.info("Tailored resume generated: %s", resume_path)
                                 send_telegram_document(job, resume_path)
                             else:

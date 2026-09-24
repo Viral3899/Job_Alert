@@ -7,6 +7,7 @@ from pathlib import Path
 
 import requests
 from docx import Document
+from docx2pdf import convert
 
 from config import GROQ_API_KEY, GROQ_MODEL
 from logging_config import logger
@@ -236,3 +237,17 @@ def build_resume_docx(job, tailored):
 
     doc.save(str(path))
     return str(path)
+
+
+def build_resume_pdf(job, tailored):
+    """Generate PDF resume from DOCX."""
+    docx_path = build_resume_docx(job, tailored)
+    pdf_path = str(Path(docx_path).with_suffix(".pdf"))
+    try:
+        convert(docx_path, pdf_path)
+        logger.info("PDF resume generated: %s", pdf_path)
+        return pdf_path
+    except Exception as exc:
+        logger.error("Failed to convert DOCX to PDF: %s", exc)
+        # Fallback to docx if PDF conversion fails
+        return docx_path

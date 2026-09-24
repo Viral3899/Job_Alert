@@ -47,7 +47,7 @@ def send_telegram_message(job: dict) -> bool:
 
 
 def send_telegram_document(job: dict, file_path: str, caption: str | None = None) -> bool:
-    """Send a DOCX file to Telegram with optional caption."""
+    """Send a PDF/DOCX file to Telegram with optional caption."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("Telegram credentials are missing.")
         return False
@@ -61,13 +61,18 @@ def send_telegram_document(job: dict, file_path: str, caption: str | None = None
     )
     caption = caption or default_caption
 
+    # Determine MIME type based on file extension
+    mime_type = "application/pdf"
+    if file_path.lower().endswith(".docx"):
+        mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
     try:
         with open(file_path, "rb") as doc:
             files = {
                 "document": (
                     Path(file_path).name,
                     doc,
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    mime_type,
                 )
             }
             data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
