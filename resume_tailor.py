@@ -31,7 +31,8 @@ def _extract_json(text):
 MAX_JD_CHARS = 8000
 MAX_BASE_RESUME_CHARS = 12000
 MAX_TOTAL_PROMPT_CHARS = 22000
-GROQ_MAX_RETRIES = 3
+GROQ_MAX_RETRIES = 5
+GROQ_BASE_WAIT_SECONDS = 5
 
 
 def _clean_job_description(text):
@@ -63,7 +64,7 @@ def _post_groq(payload):
                 timeout=90,
             )
             if response.status_code == 429:
-                wait = 3 * (2**attempt)
+                wait = GROQ_BASE_WAIT_SECONDS * (2**attempt)
                 logger.warning(
                     "Groq rate limit (429). Retrying in %ds (%d/%d)...",
                     wait,

@@ -91,6 +91,12 @@ def _unwrap_tracking_url(url: str | None, max_depth: int = 5) -> str:
             if params.get(key):
                 candidate = params[key][0]
                 break
+        # Handle Indeed's /f/a/ tracking URLs (engage.indeed.com/f/a/...)
+        if not candidate and "engage.indeed.com" in parsed.netloc and "/f/a/" in parsed.path:
+            # These are opaque tracking URLs that redirect to viewjob?jk=...
+            # We can't extract jk without following redirect, so return as-is
+            # The normalize_job_url will handle it
+            pass
         if not candidate:
             break
         candidate = unescape(unquote(candidate))
@@ -165,6 +171,11 @@ def normalize_job_url(
                 return f"https://{parsed.netloc}/viewjob?jk={match.group(1)}"
             if "viewjob" in path.lower():
                 return urlunparse(("https", parsed.netloc, path, "", query, ""))
+            # Handle Indeed's /f/a/ tracking URLs (engage.indeed.com/f/a/...)
+            # These are opaque tracking URLs that redirect to the actual job.
+            # Since we can't extract jk without following redirect, fall back to search URL.
+            if "engage.indeed.com" in host and "/f/a/" in path:
+                return _fallback_search_url(source, title)
             return urlunparse(("https", parsed.netloc, path, "", query, ""))
 
     # Other platforms: preserve the actual URL after removing tracking parameters.
@@ -242,6 +253,18 @@ def _title_from_anchor_element(anchor: BeautifulSoup | None, anchor_text: str, s
             value = clean_text(heading.get_text(" ", strip=True))
             if 4 <= len(value) <= 180:
                 return value
+        # For Indeed: look for job title in nearby elements
+        if anchor:
+            # Check parent and siblings for job title
+            parent = anchor.parent
+            if parent:
+                # Look for heading-like elements in parent
+                for tag in parent.find_all(
+                    ["h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "span"]
+                ):
+                    value = clean_text(tag.get_text(" ", strip=True))
+                    if 4 <= len(value) <= 180 and value.lower() not in generic:
+                        return value
     return _title_from_anchor(anchor_text, subject)
 
 
@@ -266,6 +289,9 @@ def extract_company(text: str | None) -> str:
         r"Employer[:\s]+([^|\n]+)",
         r"(?:company|employer)\s*[-:]\s*([^|\n]+)",
         r"at\s+([A-Z][A-Za-z0-9 .&'()-]{2,80})",
+        # Indeed-specific patterns
+        r"([A-Z][A-Za-z0-9 .&'()-]{2,80})\s*[-–]\s*(?:Remote|Hybrid|On-site)",
+        r"([A-Z][A-Za-z0-9 .&'()-]{2,80})\s*\|\s*(?:Remote|Hybrid|On-site)",
     ):
         m = re.search(pattern, text or "", re.I)
         if m:
