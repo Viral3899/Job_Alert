@@ -1,5 +1,5 @@
+# mypy: ignore-errors
 import json
-import os
 import re
 import tempfile
 import time
@@ -9,6 +9,7 @@ import requests
 from docx import Document
 
 from config import GROQ_API_KEY, GROQ_MODEL
+from logging_config import logger
 
 BASE_RESUME = Path(__file__).with_name("resume_template.docx")
 
@@ -61,18 +62,29 @@ def _post_groq(payload):
                 timeout=90,
             )
             if response.status_code == 429:
-                wait = 3 * (2 ** attempt)
-                print(f"Groq rate limit (429). Retrying in {wait}s ({attempt + 1}/{GROQ_MAX_RETRIES})...")
+                wait = 3 * (2**attempt)
+                logger.warning(
+                    "Groq rate limit (429). Retrying in %ds (%d/%d)...",
+                    wait,
+                    attempt + 1,
+                    GROQ_MAX_RETRIES,
+                )
                 time.sleep(wait)
                 last_error = requests.HTTPError("Groq rate limit", response=response)
                 continue
             if response.status_code == 413:
-                raise requests.HTTPError("Groq payload too large after prompt limits.", response=response)
+                raise requests.HTTPError(
+                    "Groq payload too large after prompt limits.", response=response
+                )
             response.raise_for_status()
             return response
         except requests.RequestException as exc:
             last_error = exc
-            if attempt < GROQ_MAX_RETRIES - 1 and getattr(exc, "response", None) is not None and exc.response.status_code >= 500:
+            if (
+                attempt < GROQ_MAX_RETRIES - 1
+                and getattr(exc, "response", None) is not None
+                and exc.response.status_code >= 500
+            ):
                 time.sleep(2 * (attempt + 1))
                 continue
             raise
@@ -82,7 +94,7 @@ def _post_groq(payload):
 def tailor_resume(job):
     """Create a JD-specific ATS resume without inventing experience."""
     if not GROQ_API_KEY:
-        print("GROQ_API_KEY missing; cannot generate tailored resume.")
+        logger.warning("GROQ_API_KEY missing; cannot generate tailored resume.")
         return None
 
     base = _read_base_resume()
@@ -142,7 +154,7 @@ Return exactly this JSON structure:
     if len(prompt) > MAX_TOTAL_PROMPT_CHARS:
         # Last-resort deterministic trim of the JD only; preserve the JSON instructions.
         overflow = len(prompt) - MAX_TOTAL_PROMPT_CHARS
-        jd = jd[:max(3000, len(jd) - overflow - 100)]
+        jd = jd[: max(3000, len(jd) - overflow - 100)]
         prompt = prompt_template.format(title=title, company=company, jd=jd, base=base)
 
     payload = {
@@ -182,7 +194,9 @@ def build_resume_docx(job, tailored):
 
     p = doc.add_paragraph()
     p.alignment = 1
-    p.add_run("Ahmedabad, Gujarat, India | +91-8140408415 | viralsherathiya1008@gmail.com | linkedin.com/in/viralsherathiya | github.com/Viral3899")
+    p.add_run(
+        "Ahmedabad, Gujarat, India | +91-8140408415 | viralsherathiya1008@gmail.com | linkedin.com/in/viralsherathiya | github.com/Viral3899"
+    )
 
     def heading(text):
         p = doc.add_paragraph()

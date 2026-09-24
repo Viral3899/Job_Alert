@@ -1,3 +1,26 @@
+Metadata-Version: 2.4
+Name: job-monitor
+Version: 4.0.0
+Summary: Job Monitor - Gmail job alerts with matching and Telegram notifications
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: google-api-python-client==2.147.0
+Requires-Dist: google-auth-httplib2==0.2.0
+Requires-Dist: google-auth-oauthlib==1.2.1
+Requires-Dist: beautifulsoup4==4.12.3
+Requires-Dist: python-dotenv==1.0.1
+Requires-Dist: requests==2.32.3
+Requires-Dist: python-docx==1.1.2
+Provides-Extra: dev
+Requires-Dist: pytest==8.3.2; extra == "dev"
+Requires-Dist: pytest-cov==5.0.0; extra == "dev"
+Requires-Dist: ruff==0.6.5; extra == "dev"
+Requires-Dist: black==24.8.0; extra == "dev"
+Requires-Dist: mypy==1.11.2; extra == "dev"
+Requires-Dist: types-requests==2.32.0.20240914; extra == "dev"
+Dynamic: license-file
+
 # Job Monitor v4 — 15-Minute Scheduler + Exact Job Links + Tailored Resume
 
 This version checks official job-alert emails in Gmail, looks back 48 hours, matches jobs at 60%+, keeps the exact job-specific apply URL when available, generates a JD-specific ATS resume, and sends the result to Telegram.

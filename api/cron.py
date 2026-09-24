@@ -1,9 +1,11 @@
 import os
 import traceback
+from typing import Any
+
 from main import process_jobs
 
 
-def handler(request):
+def handler(request: Any) -> dict[str, Any]:
     expected = os.getenv("CRON_SECRET")
     if expected:
         auth = request.headers.get("authorization", "")

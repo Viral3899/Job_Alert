@@ -2,6 +2,7 @@
 credentials.json
 token.json
 *.db
+data/
 __pycache__/
 .venv/
 venv/

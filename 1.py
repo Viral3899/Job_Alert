@@ -1,4 +1,5 @@
 import os
+
 import requests
 from dotenv import load_dotenv
 
@@ -23,15 +24,11 @@ payload = {
         "🚀 Job Monitor Test\n\n"
         "✅ Telegram bot is connected successfully!\n"
         "🔔 You will receive matching job alerts here."
-    )
+    ),
 }
 
 try:
-    response = requests.post(
-        url,
-        data=payload,
-        timeout=20
-    )
+    response = requests.post(url, data=payload, timeout=20)
 
     print("HTTP Status:", response.status_code)
     print("Response:", response.json())

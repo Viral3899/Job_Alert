@@ -2,18 +2,31 @@ import base64
 import json
 import os
 import time
+from typing import TypedDict
 
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
+from googleapiclient.discovery import Resource, build
+
+from logging_config import logger
 
 # modify is required because the monitor labels processed emails.
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 PROCESSED_LABEL = "JOB_MONITOR_PROCESSED"
 
 
-def _credentials_from_env():
+class EmailDict(TypedDict):
+    id: str
+    subject: str
+    sender: str
+    date: str
+    body: str
+    raw_html: str
+    internal_date: int
+
+
+def _credentials_from_env() -> Credentials | None:
     raw = os.getenv("GMAIL_TOKEN_JSON")
     if not raw:
         return None
@@ -22,25 +35,27 @@ def _credentials_from_env():
         # Do not request a new scope during construction. We validate the
         # stored scopes below and force a fresh OAuth flow when gmail.modify
         # is not present.
-        return Credentials.from_authorized_user_info(info)
+        return Credentials.from_authorized_user_info(info)  # type: ignore[no-any-return]
     except Exception:
         return None
 
 
-def _has_required_scope(creds):
+def _has_required_scope(creds: Credentials) -> bool:
     required = "https://www.googleapis.com/auth/gmail.modify"
     scopes = set(creds.scopes or [])
     return required in scopes
 
 
-def _local_oauth_flow():
+def _local_oauth_flow() -> Credentials:
     if not os.path.exists("credentials.json"):
-        raise RuntimeError("credentials.json is missing. Download your Google OAuth client credentials first.")
+        raise RuntimeError(
+            "credentials.json is missing. Download your Google OAuth client credentials first."
+        )
     flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-    return flow.run_local_server(port=0)
+    return flow.run_local_server(port=0)  # type: ignore[no-any-return]
 
 
-def get_gmail_service():
+def get_gmail_service() -> Resource:
     # A token created with gmail.readonly cannot be silently upgraded to
     # gmail.modify. It must be re-authorized. This was the source of the
     # invalid_scope/insufficientPermissions errors after the processed-label
@@ -82,7 +97,9 @@ def get_gmail_service():
         except OSError:
             pass
 
-        print("Gmail OAuth scope is outdated. Starting a fresh gmail.modify authorization...")
+        logger.warning(
+            "Gmail OAuth scope is outdated. Starting a fresh gmail.modify authorization..."
+        )
         creds = _local_oauth_flow()
 
     if not os.getenv("VERCEL"):
@@ -92,26 +109,35 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
-def _ensure_label(service):
+def _ensure_label(service: Resource) -> str:
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
     for label in labels:
         if label.get("name") == PROCESSED_LABEL:
-            return label["id"]
-    created = service.users().labels().create(
-        userId="me",
-        body={"name": PROCESSED_LABEL, "labelListVisibility": "labelShow", "messageListVisibility": "show"},
-    ).execute()
-    return created["id"]
+            return label["id"]  # type: ignore[no-any-return]
+    created = (
+        service.users()
+        .labels()
+        .create(
+            userId="me",
+            body={
+                "name": PROCESSED_LABEL,
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            },
+        )
+        .execute()
+    )
+    return created["id"]  # type: ignore[no-any-return]
 
 
-def get_job_emails(lookback_hours=48):
+def get_job_emails(lookback_hours: int = 48) -> list[EmailDict]:
     service = get_gmail_service()
     # Gmail broad query; exact filtering is performed below.
-    query = 'newer_than:3d (from:(linkedin.com) OR from:(indeed.com) OR from:(naukri.com) OR from:(wellfound.com) OR from:(cutshort.io) OR from:(instahyre.com) OR from:(hirist.tech) OR from:(foundit.in) OR from:(timesjobs.com) OR from:(shine.com) OR from:(freshersworld.com))'
+    query = "newer_than:3d (from:(linkedin.com) OR from:(indeed.com) OR from:(naukri.com) OR from:(wellfound.com) OR from:(cutshort.io) OR from:(instahyre.com) OR from:(hirist.tech) OR from:(foundit.in) OR from:(timesjobs.com) OR from:(shine.com) OR from:(freshersworld.com))"
     result = service.users().messages().list(userId="me", q=query, maxResults=100).execute()
     messages = result.get("messages", [])
     cutoff_ms = (time.time() - lookback_hours * 3600) * 1000
-    emails = []
+    emails: list[EmailDict] = []
 
     for item in messages:
         msg = service.users().messages().get(userId="me", id=item["id"], format="full").execute()
@@ -128,22 +154,30 @@ def get_job_emails(lookback_hours=48):
         if label_id and label_id in labels:
             continue
 
-        headers = {h["name"].lower(): h.get("value", "") for h in msg.get("payload", {}).get("headers", [])}
-        emails.append({
-            "id": item["id"],
-            "subject": headers.get("subject", ""),
-            "sender": headers.get("from", ""),
-            "date": headers.get("date", ""),
-            "body": extract_body(msg.get("payload", {})),
-            "raw_html": extract_html(msg.get("payload", {})),
-            "internal_date": internal_date,
-        })
+        headers = {
+            h["name"].lower(): h.get("value", "") for h in msg.get("payload", {}).get("headers", [])
+        }
+        emails.append(
+            {
+                "id": item["id"],
+                "subject": headers.get("subject", ""),
+                "sender": headers.get("from", ""),
+                "date": headers.get("date", ""),
+                "body": extract_body(msg.get("payload", {})),
+                "raw_html": extract_html(msg.get("payload", {})),
+                "internal_date": internal_date,
+            }
+        )
 
-    print(f"Found {len(emails)} unprocessed job-alert email(s) within the last {lookback_hours} hours.")
+    logger.info(
+        "Found %d unprocessed job-alert email(s) within the last %d hours.",
+        len(emails),
+        lookback_hours,
+    )
     return emails
 
 
-def extract_body(payload):
+def extract_body(payload: dict) -> str:
     data = payload.get("body", {}).get("data")
     if data:
         return _decode(data)
@@ -157,7 +191,7 @@ def extract_body(payload):
     return ""
 
 
-def extract_html(payload):
+def extract_html(payload: dict) -> str:
     data = payload.get("body", {}).get("data")
     if data and payload.get("mimeType") == "text/html":
         return _decode(data)
@@ -171,11 +205,11 @@ def extract_html(payload):
     return ""
 
 
-def _decode(data):
+def _decode(data: str) -> str:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", errors="ignore")
 
 
-def mark_emails_processed(message_ids):
+def mark_emails_processed(message_ids: list[str]) -> None:
     if not message_ids:
         return
     service = get_gmail_service()
@@ -183,5 +217,5 @@ def mark_emails_processed(message_ids):
     for i in range(0, len(message_ids), 100):
         service.users().messages().batchModify(
             userId="me",
-            body={"ids": message_ids[i:i+100], "addLabelIds": [label_id]},
+            body={"ids": message_ids[i : i + 100], "addLabelIds": [label_id]},
         ).execute()
