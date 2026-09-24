@@ -370,6 +370,118 @@ def parse_email(email: dict) -> JobDict:
     )
 
 
+def _is_junk_job(title: str, context: str) -> bool:
+    """Filter out non-job content like privacy policies, terms, unsubscribe links."""
+    text = f"{title} {context}".lower()
+    junk_patterns = [
+        "privacy policy",
+        "terms of use",
+        "terms and conditions",
+        "terms of service",
+        "unsubscribe",
+        "manage preferences",
+        "manage job alerts",
+        "edit job alert",
+        "view all jobs",
+        "see all jobs",
+        "help centre",
+        "help center",
+        "contact us",
+        "contact indeed",
+        "learn how to avoid scams",
+        "avoid scams",
+        "fraud",
+        "cookie policy",
+        "legal notice",
+        "accessibility",
+        "sitemap",
+        "about us",
+        "careers at",
+        "work at",
+        "press",
+        "blog",
+        "api",
+        "developers",
+        "partner",
+        "advertise",
+        "employer",
+        "hiring",
+        "recruiter",
+        "staffing",
+        "talent",
+        "login",
+        "sign in",
+        "sign up",
+        "register",
+        "password",
+        "forgot",
+        "reset",
+        "verify",
+        "confirm email",
+        "confirmation",
+        "activate",
+        "deactivate",
+        "delete account",
+        "close account",
+        "notification settings",
+        "email preferences",
+        "frequency",
+        "daily",
+        "weekly",
+        "monthly",
+        "instant",
+        "digest",
+    ]
+    # Check if title is very short or matches junk patterns
+    if len(title.strip()) < 4:
+        return True
+    for pattern in junk_patterns:
+        if pattern in text:
+            return True
+    # Filter out titles that are just navigation/UI elements
+    ui_terms = {
+        "edit",
+        "view",
+        "manage",
+        "unsubscribe",
+        "help",
+        "contact",
+        "privacy",
+        "terms",
+        "policy",
+        "legal",
+        "security",
+        "settings",
+        "preferences",
+        "alert",
+        "alerts",
+        "notification",
+        "notifications",
+        "email",
+        "emails",
+        "job alert",
+        "job alerts",
+        "indeed",
+        "linkedin",
+        "naukri",
+        "for last",
+        "since yesterday",
+        "when jobs become available",
+        "easily apply",
+        "actively hiring",
+        "apply now",
+        "view job",
+        "see job",
+        "open job",
+        "learn more",
+        "read more",
+        "click here",
+    }
+    if title.strip().lower() in ui_terms:
+        return True
+    return False
+
+
 def parse_email_jobs(email: dict[str, Any]) -> list[JobDict]:
     """Extract every job card and preserve its own apply URL and local card text."""
     raw = email.get("raw_html") or email.get("body", "")
@@ -383,6 +495,10 @@ def parse_email_jobs(email: dict[str, Any]) -> list[JobDict]:
         context = _context_text(anchor) or body
         title = _title_from_anchor_element(anchor, anchor_text, email.get("subject", ""))
         normalized = normalize_job_url(href, source, title)
+
+        # Skip junk jobs
+        if _is_junk_job(title, context):
+            continue
 
         # If normalization returned only a generic platform page, do not use it
         # as a unique job identity when we have no exact job URL.

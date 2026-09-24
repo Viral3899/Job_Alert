@@ -1,5 +1,6 @@
 # mypy: ignore-errors
 import json
+import random
 import re
 import tempfile
 import time
@@ -31,8 +32,8 @@ def _extract_json(text):
 MAX_JD_CHARS = 8000
 MAX_BASE_RESUME_CHARS = 12000
 MAX_TOTAL_PROMPT_CHARS = 22000
-GROQ_MAX_RETRIES = 5
-GROQ_BASE_WAIT_SECONDS = 5
+GROQ_MAX_RETRIES = 8
+GROQ_BASE_WAIT_SECONDS = 10
 
 
 def _clean_job_description(text):
@@ -64,9 +65,9 @@ def _post_groq(payload):
                 timeout=90,
             )
             if response.status_code == 429:
-                wait = GROQ_BASE_WAIT_SECONDS * (2**attempt)
+                wait = GROQ_BASE_WAIT_SECONDS * (2**attempt) + random.uniform(0, 2)
                 logger.warning(
-                    "Groq rate limit (429). Retrying in %ds (%d/%d)...",
+                    "Groq rate limit (429). Retrying in %.1fs (%d/%d)...",
                     wait,
                     attempt + 1,
                     GROQ_MAX_RETRIES,
@@ -241,14 +242,59 @@ def build_resume_docx(job, tailored):
 
 
 def build_resume_pdf(job, tailored):
-    """Generate PDF resume from DOCX."""
+    """Generate PDF resume from DOCX with multiple fallback methods."""
     docx_path = build_resume_docx(job, tailored)
     pdf_path = str(Path(docx_path).with_suffix(".pdf"))
+
+    # Method 1: Try docx2pdf (uses Word COM on Windows, LibreOffice on Linux)
     try:
         convert(docx_path, pdf_path)
-        logger.info("PDF resume generated: %s", pdf_path)
-        return pdf_path
+        if Path(pdf_path).exists() and Path(pdf_path).stat().st_size > 0:
+            logger.info("PDF resume generated via docx2pdf: %s", pdf_path)
+            return pdf_path
     except Exception as exc:
-        logger.error("Failed to convert DOCX to PDF: %s", exc)
-        # Fallback to docx if PDF conversion fails
-        return docx_path
+        logger.warning("docx2pdf failed: %s", exc)
+
+    # Method 2: Try LibreOffice headless (if available on Linux)
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "libreoffice",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(Path(docx_path).parent),
+                docx_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0 and Path(pdf_path).exists() and Path(pdf_path).stat().st_size > 0:
+            logger.info("PDF resume generated via LibreOffice: %s", pdf_path)
+            return pdf_path
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as exc:
+        logger.warning("LibreOffice conversion failed: %s", exc)
+
+    # Method 3: Try Microsoft Word via COM directly (Windows only)
+    try:
+        import comtypes.client
+
+        word = comtypes.client.CreateObject("Word.Application")
+        word.Visible = False
+        doc = word.Documents.Open(docx_path)
+        doc.SaveAs(pdf_path, FileFormat=17)  # 17 = wdFormatPDF
+        doc.Close()
+        word.Quit()
+        if Path(pdf_path).exists() and Path(pdf_path).stat().st_size > 0:
+            logger.info("PDF resume generated via Word COM: %s", pdf_path)
+            return pdf_path
+    except Exception as exc:
+        logger.warning("Word COM conversion failed: %s", exc)
+
+    # All methods failed - return DOCX
+    logger.warning("All PDF conversion methods failed, falling back to DOCX")
+    return docx_path
